@@ -1,0 +1,8 @@
+{
+  "title": "PaperFX",
+  "description": "Fullscreen Butterchurn wallpaper for Wallpaper Engine using desktop audio.",
+  "file": "index.html",
+  "type": "web",
+  "version": 1,
+  "tags": ["audio responsive", "butterchurn", "visualizer"]
+}
