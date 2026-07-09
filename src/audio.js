@@ -1,5 +1,17 @@
 const TWO_PI = Math.PI * 2;
 
+// Number of frequency bins used for IDFT waveform synthesis.
+// Covers the bass and mid frequency range that dominates waveform shape.
+const WAVEFORM_BINS = 64;
+
+// Bins below this amplitude are skipped in the IDFT to avoid spending CPU on
+// inaudible content. Spectrum values are in [0, 1] (normalized WE output).
+const MIN_AUDIBLE_AMPLITUDE = 0.001;
+
+// Floor applied to the IDFT output peak before computing the normalization
+// gain, preventing runaway amplification during near-silent passages.
+const MIN_PEAK_THRESHOLD = 0.01;
+
 function clampInt8(value) {
   return Math.max(-128, Math.min(127, Math.round(value)));
 }
@@ -36,7 +48,14 @@ export class ButterchurnAudioBridge {
     this.frequencyDataRight = new Float32Array(config.frequencyBins);
     this.waveformLeft = new Int8Array(config.frequencyBins);
     this.waveformRight = new Int8Array(config.frequencyBins);
-    this.phase = 0;
+    // Phase accumulators for continuous IDFT waveform synthesis.
+    // Seeded randomly so consecutive instances start at different points.
+    this.synthPhases = new Float32Array(config.frequencyBins);
+    for (let k = 0; k < config.frequencyBins; k += 1) {
+      this.synthPhases[k] = Math.random() * TWO_PI;
+    }
+    // Pre-allocated temporary buffer for the float waveform before clamping.
+    this.tempWave = new Float32Array(config.frequencyBins);
     this.lastUpdateTime = 0;
   }
 
@@ -66,31 +85,55 @@ export class ButterchurnAudioBridge {
   writeTo(audioProcessor, now = performance.now()) {
     this.decayIfIdle(now);
 
-    let energy = 0;
-    const lastIndex = this.smoothedSpectrum.length - 1;
+    const N = this.smoothedSpectrum.length;
+    const bins = Math.min(WAVEFORM_BINS, N);
 
-    for (let i = 0; i < this.smoothedSpectrum.length; i += 1) {
-      const amplitude = this.smoothedSpectrum[i];
-      const previous = this.smoothedSpectrum[i === 0 ? 0 : i - 1];
-      const next = this.smoothedSpectrum[i === lastIndex ? lastIndex : i + 1];
-      const harmonic =
-        Math.sin(((i / this.smoothedSpectrum.length) * this.config.waveformCycles * TWO_PI) + this.phase) *
-        amplitude;
-      const derivative = (next - previous) * 0.5;
-      const waveformValue =
-        (harmonic * this.config.waveformGain) +
-        (derivative * this.config.waveformGain * 1.6);
-      const frequencyValue = amplitude * this.config.frequencyGain;
-
-      this.frequencyData[i] = frequencyValue;
-      this.frequencyDataLeft[i] = frequencyValue;
-      this.frequencyDataRight[i] = frequencyValue;
-      this.waveformLeft[i] = clampInt8(waveformValue);
-      this.waveformRight[i] = clampInt8((waveformValue * 0.8) - (harmonic * this.config.waveformGain * 0.15));
-      energy += amplitude;
+    // Build frequency arrays from the smoothed spectrum.
+    for (let i = 0; i < N; i += 1) {
+      const freq = this.smoothedSpectrum[i] * this.config.frequencyGain;
+      this.frequencyData[i] = freq;
+      this.frequencyDataLeft[i] = freq;
+      this.frequencyDataRight[i] = freq;
     }
 
-    this.phase += 0.03 + (energy / this.smoothedSpectrum.length) * 0.35;
+    // Synthesize time-domain waveform via inverse DFT.
+    // Each frequency bin k contributes a sinusoid at (k/N) cycles per window.
+    // Phase accumulators advance continuously so the waveform evolves smoothly
+    // across frames rather than restarting at a fixed phase each call.
+    // k=0 (DC component) is intentionally skipped to prevent a DC offset in
+    // the waveform output.
+    // smoothedSpectrum values are in [0, 1] (normalized from Wallpaper Engine),
+    // so the 0.001 threshold safely drops inaudible bins without skipping
+    // meaningful content.
+    this.tempWave.fill(0);
+    for (let k = 1; k < bins; k += 1) {
+      const amp = this.smoothedSpectrum[k];
+      if (amp < MIN_AUDIBLE_AMPLITUDE) continue;
+      const phaseInc = (TWO_PI * k) / N;
+      let phi = this.synthPhases[k];
+      for (let n = 0; n < N; n += 1) {
+        this.tempWave[n] += amp * Math.cos(phi);
+        phi += phaseInc;
+      }
+      // phi started positive and was only incremented, so it is always >= 0.
+      // A plain modulo is therefore equivalent to the signed-safe form here.
+      this.synthPhases[k] = phi % TWO_PI;
+    }
+
+    // Normalize the synthesized waveform so it fills the display at any
+    // volume level. A small minimum peak prevents runaway gain during near-
+    // silent passages while still producing a proportionally quiet waveform.
+    let peak = 0;
+    for (let n = 0; n < N; n += 1) {
+      const abs = Math.abs(this.tempWave[n]);
+      if (abs > peak) peak = abs;
+    }
+    const gain = this.config.waveformGain / Math.max(peak, MIN_PEAK_THRESHOLD);
+    for (let n = 0; n < N; n += 1) {
+      const v = clampInt8(this.tempWave[n] * gain);
+      this.waveformLeft[n] = v;
+      this.waveformRight[n] = v;
+    }
 
     audioProcessor.freqArray = this.frequencyData;
     audioProcessor.freqArrayL = this.frequencyDataLeft;

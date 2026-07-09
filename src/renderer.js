@@ -78,7 +78,7 @@ export class WallpaperRenderer {
     this.presetManager.update(timestamp);
 
     try {
-      const elapsedTime = this.lastFrameTime ? timestamp - this.lastFrameTime : 16.67;
+      const elapsedTime = this.lastFrameTime ? (timestamp - this.lastFrameTime) / 1000 : 1 / 60;
       this.visualizer.render({ elapsedTime });
       this.lastFrameTime = timestamp;
     } catch (error) {

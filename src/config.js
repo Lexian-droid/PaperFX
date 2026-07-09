@@ -16,7 +16,6 @@ export const CONFIG = Object.freeze({
     smoothing: 0.68,
     frequencyGain: 256,
     waveformGain: 104,
-    waveformCycles: 6,
     idleDecayPerFrame: 0.94,
     idleThresholdMs: 250
   }),
